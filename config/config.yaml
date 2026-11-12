@@ -1,0 +1,47 @@
+# Configuration du banc Raman — lue par raman_auto.config.load_config()
+
+data_dir: data            # relatif à la racine du projet
+
+laser:
+  lines_nm: [514.5, 488.0]
+  default_nm: 514.5
+
+lightfield:
+  visible: true           # afficher la fenêtre LightField pendant l'automatisation
+  experiment: null        # nom d'une expérience LightField sauvegardée (.lfe), ex. "Raman_514"
+
+pm100d:
+  dll: C:\Program Files\IVI Foundation\VISA\Win64\Bin\PM100D_64.dll
+  resource: null          # null = premier PM100D trouvé, sinon "USB0::0x1313::0x8078::P000xxxx::INSTR"
+  avg_time_s: 0.1
+
+ultimaker:
+  # Câble Ethernet direct (carte « Ethernet 4 ») ; le nom .local se résout en IPv6 local.
+  host: ultimakersystem-ccbdd3009d9d.local
+  user: root
+  ssh_options:
+    - HostKeyAlgorithms=+ssh-rsa
+    - PubkeyAcceptedAlgorithms=+ssh-rsa
+    - MACs=hmac-sha1
+    - ConnectTimeout=10
+  # um3_bridge.py tourne sur l'imprimante et envoie le G-code à griffin par D-Bus (debugSendGCode).
+  remote_bridge_path: /tmp/um3_bridge.py
+  command_timeout_s: 120
+  # Limites logicielles (mm, repère machine).
+  # Axe Z : Z = 0 → plateau proche de la sonde ; G28 → X = Y = 0 et Z au maximum (plateau en bas).
+  # z min : à fixer d'après la cote de contact plateau/sonde + marge + épaisseur d'échantillon.
+  limits:
+    x: [0.0, 215.0]
+    y: [0.0, 215.0]
+    z: [10.0, 210.0]
+  # move_precise : pré-position à (cible + décalage) puis approche finale, toujours du même côté.
+  # Compense le jeu mécanique et contourne le firmware, qui ignore les mouvements < 5 pas (~62 µm en XY).
+  approach_mm: {x: -0.5, y: -0.5, z: 0.5}
+  feedrate_xy_mm_min: 3000
+  feedrate_z_mm_min: 600
+
+gui:
+  # Orientation de la vue 2D de la platine, pour qu'elle corresponde à ce que voit l'opérateur.
+  invert_x: false
+  invert_y: false
+  default_step_mm: 1.0

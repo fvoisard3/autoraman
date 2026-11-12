@@ -1,0 +1,1 @@
+C:\Users\admin\.conda\envs\raman\python.exe .\run_gui.py

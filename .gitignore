@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Données de mesure (fichiers HDF5, CSV, journaux) : restent sur le PC du labo
+data/
+*.h5
+*.hdf5
+
+# Divers
+*.log
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
