@@ -33,7 +33,7 @@ ultimaker:
   limits:
     x: [0.0, 215.0]
     y: [0.0, 215.0]
-    z: [10.0, 210.0]
+    z: [5.0, 210.0]
   # move_precise : pré-position à (cible + décalage) puis approche finale, toujours du même côté.
   # Compense le jeu mécanique et contourne le firmware, qui ignore les mouvements < 5 pas (~62 µm en XY).
   approach_mm: {x: -0.5, y: -0.5, z: 0.5}

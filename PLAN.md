@@ -73,13 +73,29 @@ Reste : spectre en direct (aperçu continu).
 - Rappel de remesure (avant/après une longue carte) ; comparaison avec la session précédente.
 
 ### Phase 4 — Taille du spot (knife-edge)
+Fait (2026-11-12), mode A au wattmètre : bouton « Knife-edge… » de l'interface (`raman_auto/knife/`,
+`raman_auto/gui/knife_window.py`). Carte rectangulaire → ajustement d'un bord droit (position, orientation)
+→ lignes perpendiculaires au bord, recentrées et adaptées au spot (~10 w, pas w/5 ≥ 12,5 µm) → une ligne par Z
+→ caustique (z0, w0, zR, M²), second passage fin autour du minimum, fin au foyer. Option : réutiliser le bord
+trouvé (pas de carte). Fichier `data/knife_edge/<date>/knife_<heure>.h5`. Validé en simulation (lame à 20°,
+w0 = 30 µm, foyer 25 mm, zR = 0,4 mm : tout retrouvé à < 1 %) ; essai réel à faire.
+Note : M114 ne donne la position qu'à 0,01 mm → la position utilisée est la cible arrondie au pas moteur
+(12,5 µm) quand la lecture concorde ; sinon les profils sont faussés de quelques µm.
+Essais réels au wattmètre (2026-11-12) : foyer Z ≈ 9,83 mm, w0 ≈ 64–68 µm (diamètre 1/e² ≈ 130 µm),
+zR ≈ 0,30 mm (deux mesures concordantes à 0,02 mm près sur le foyer).
+
+Fait (2026-11-12), mode B (bord de wafer de Si) : signal « Raman — pic du Si » (fenêtre 495–545 cm⁻¹) ou
+« Raie laser résiduelle » (fenêtre −40 à 40 cm⁻¹), aire avec fond linéaire, image complète sommée sur les lignes,
+réglages courants du spectromètre ; spectre de chaque point enregistré ; avertissement de saturation de la caméra ;
+fenêtre vérifiée contre l'axe du spectromètre avant de commencer. Validé en simulation ; essai réel à faire.
+
 **Mode A : lame de rasoir + PM100D (maintenant)**
 - Lame fixée sur le plateau, capteur dessous ; la sonde balaie en X (puis en Y) à travers le bord.
 - Ajustement `P(x) = P_off + P₀/2 · [1 − erf(√2 (x − x₀) / w)]` → rayon w à 1/e², diamètre 2w, FWHM.
 - Balayage à plusieurs Z autour de 7 mm → **caustique** `w(z) = w₀ √(1 + ((z − z₀)/z_R)²)` → waist w₀, position du foyer z₀, longueur de Rayleigh z_R, pour chaque raie (488 et 514.5).
 - Pas adaptatif : grossier pour trouver le bord, fin (≤ w/5) dans la transition.
 
-**Mode B : wafer de silicium (prévu)**
+**Mode B : wafer de silicium (fait, voir plus haut)**
 - Balayage à travers un bord clivé du wafer, avec comme signal l'aire du pic Si 520.7 cm⁻¹ mesurée par le spectromètre.
 - Donne la résolution effective excitation × collection (différente du spot laser seul) ; à comparer au mode A.
 

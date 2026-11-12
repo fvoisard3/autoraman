@@ -19,6 +19,7 @@ from ..drivers.lightfield import LightFieldSpectrometer, format_grating, raman_s
 from ..drivers.pm100d import format_power
 from ..drivers.sim import SimSpectrometer, SimStage
 from ..drivers.ultimaker import UltimakerStage
+from .knife_window import KnifeEdgeWindow
 from .power_panel import PowerPanel
 from .scan import ScanRunner, format_bytes, image_bytes
 from .stage_view import INK, MIN_DRAWN_MM, PLATE_EDGE, ZONE_COLOR, StageView
@@ -59,7 +60,8 @@ class MainWindow(QMainWindow):
         self.homed = False
         self.last_spectrum = None
         self.applied = {}  # dernières valeurs envoyées au spectromètre
-        self.runner = None
+        self.runner = None        # tâche automatique en cours : exécution des zones ou knife-edge
+        self.knife_window = None
 
         self.stage_thread = DeviceThread(self)
         self.spectro_thread = DeviceThread(self)
@@ -160,6 +162,17 @@ class MainWindow(QMainWindow):
                           toolTip="Ouvre l'outil de cartes et graphiques (programme séparé) sur le dernier fichier")
         analyse.triggered.connect(self._open_analysis)
         bar.addAction(analyse)
+        knife = QAction("Knife-edge…", self, toolTip="Mesure de la taille du spot et recherche du foyer")
+        knife.triggered.connect(self._open_knife)
+        bar.addAction(knife)
+
+    def _open_knife(self):
+        if self.knife_window is None:
+            self.knife_window = KnifeEdgeWindow(self)
+        self.knife_window.refresh_zones()
+        self.knife_window.show()
+        self.knife_window.raise_()
+        self.knife_window.activateWindow()
 
     def _open_analysis(self):
         """Lance run_analyse.py dans un processus séparé : l'acquisition n'est pas affectée."""
@@ -470,7 +483,7 @@ class MainWindow(QMainWindow):
         if not connected:
             status = "Déconnectée"
         elif self.runner is not None:
-            status = "Exécution des zones en cours"
+            status = self.runner.status_text
         elif busy:
             status = "En mouvement…"
         else:
@@ -573,6 +586,8 @@ class MainWindow(QMainWindow):
             widget.setEnabled(connected and not busy)
         self.spectro_status.setText("Déconnecté" if not connected else "Occupé…" if busy else "Prêt")
         self._refresh_run_ui()
+        if self.knife_window is not None:
+            self.knife_window._refresh()  # réglages du spectromètre affichés dans la fenêtre knife-edge
 
     def _toggle_spectro(self):
         if self.spectro is None:
@@ -672,12 +687,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ exécution des zones
     def _refresh_run_ui(self):
         running = self.runner is not None
+        zones_running = isinstance(self.runner, ScanRunner)  # pause/arrêt du knife-edge : dans sa fenêtre
         # Les appareils requis par les zones cochées sont vérifiés au lancement, avec un message explicite
         ready = (self.stage is not None and self.homed and bool(self.zones)
                  and not self.stage_thread.busy and not self.spectro_thread.busy)
         self.run_start.setEnabled(ready and not running)
-        self.run_pause.setEnabled(running)
-        self.run_stop.setEnabled(running)
+        self.run_pause.setEnabled(zones_running)
+        self.run_stop.setEnabled(zones_running)
         self.run_name.setEnabled(not running)
         self.zone_table.setEnabled(not running)
         for action in self.tool_actions.values():
@@ -787,7 +803,7 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
             self.runner.stop()
-            self.runner._finish("Exécution arrêtée à la fermeture.")
+            self.runner.abort("Exécution arrêtée à la fermeture.")
         self.power.shutdown()
         self.stage_thread.shutdown(self.stage.close if self.stage else None)
         self.spectro_thread.shutdown(self.spectro.close if self.spectro else None, timeout_s=60.0)

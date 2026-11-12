@@ -19,6 +19,7 @@ class ScanRunner(QObject):
 
     def __init__(self, stage_thread, spectro_thread, power_thread, stage, spectro, pm, zones, make_writer):
         super().__init__()
+        self.status_text = "Exécution des zones en cours"
         self.stage_thread, self.spectro_thread, self.power_thread = stage_thread, spectro_thread, power_thread
         self.stage, self.spectro, self.pm = stage, spectro, pm
         self.points, self.zone_index = scan_points(zones)
@@ -148,6 +149,10 @@ class ScanRunner(QObject):
     def _on_failed(self, tag, message):
         if tag.startswith("scan_"):
             self._finish(f"Exécution interrompue par une erreur : {message}")
+
+    def abort(self, message):
+        """Fin immédiate (fermeture de l'application) : le fichier est fermé avec les points déjà mesurés."""
+        self._finish(message)
 
     def _finish(self, message):
         if self._done:
