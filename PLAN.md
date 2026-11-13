@@ -54,6 +54,15 @@ Principes :
 - PM100D : capteur S121C, lecture OK. Zéro et mesure avec laser à faire, faisceau contrôlé par l'opérateur.
 - Reste : cote de contact plateau/sonde (`limits.z`), test avec laser sur Si, réglage IntelliCal (désactivé dans l'expérience par défaut ; à charger avec une expérience sauvegardée).
 
+**Calibrations LightField (2026-11-12)** — décision : les corrections se font en Python, sur les images brutes.
+`scripts/extraire_calibrations.py` (lecture seule) extrait d'un .spe ou d'une expérience .lfe :
+longueur d'onde par pixel (dans chaque .spe), facteurs IntelliCal par pixel (magasin
+`C:\ProgramData\Princeton Instruments\Experiment Control\Intensity Calibration\<GUID>`, associés par date),
+fonds et flatfields de référence. Vérifié : corrigé LightField = k · A · (brut − fond) pixel par pixel (écart nul).
+Seule calibration IntelliCal utilisée : 2022-02-28, réseau 1200 traits/mm, step and glue 556,4 / 592,8 nm
+(variation de A ≈ 9 % sur la plage ; dernière ligne du capteur aberrante). Rien pour le réseau 300 traits/mm
+à 585 nm utilisé par l'interface → nouvelle calibration prévue dans l'expérience LightField `calib_data`.
+
 ### Phase 1 — Drivers + simulateurs + config
 Interfaces communes, implémentations réelles et simulées, tests unitaires sur les simulateurs.
 

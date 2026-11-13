@@ -31,9 +31,9 @@ ultimaker:
   # Axe Z : Z = 0 → plateau proche de la sonde ; G28 → X = Y = 0 et Z au maximum (plateau en bas).
   # z min : à fixer d'après la cote de contact plateau/sonde + marge + épaisseur d'échantillon.
   limits:
-    x: [0.0, 215.0]
-    y: [0.0, 215.0]
-    z: [5.0, 210.0]
+    x: [5.0, 210.0]
+    y: [5.0, 210.0]
+    z: [0.0, 210.0]
   # move_precise : pré-position à (cible + décalage) puis approche finale, toujours du même côté.
   # Compense le jeu mécanique et contourne le firmware, qui ignore les mouvements < 5 pas (~62 µm en XY).
   approach_mm: {x: -0.5, y: -0.5, z: 0.5}
