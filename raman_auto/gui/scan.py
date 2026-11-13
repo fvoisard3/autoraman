@@ -14,7 +14,7 @@ from PySide6.QtCore import QObject, Signal
 
 class ScanRunner(QObject):
     progress = Signal(int, int, float)               # points faits, total, temps restant estimé (s)
-    point_done = Signal(int, float, float, object)   # indice, x, y, spectre (somme des lignes) ou None
+    point_done = Signal(int, float, float, object, float)  # indice, x, y, spectre (somme des lignes) ou None, P (W)
     finished = Signal(str)
 
     def __init__(self, stage_thread, spectro_thread, power_thread, stage, spectro, pm, zones, make_writer):
@@ -140,7 +140,8 @@ class ScanRunner(QObject):
                            zone_index=int(self.zone_index[self.i]), timestamp=time.time(),
                            power_W=self._results.get("power", float("nan")), acquisition_s=duration)
         spectrum = image.sum(axis=0).astype(float) if image is not None else None
-        self.point_done.emit(self.i, float(target[0]), float(target[1]), spectrum)
+        self.point_done.emit(self.i, float(target[0]), float(target[1]), spectrum,
+                             float(self._results.get("power", float("nan"))))
         self.i += 1
         elapsed = time.monotonic() - self._t0
         self.progress.emit(self.i, len(self.points), elapsed / self.i * (len(self.points) - self.i))

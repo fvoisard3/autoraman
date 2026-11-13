@@ -374,7 +374,7 @@ class KnifeEdgeWindow(QWidget):
                         window_hi=max(self.win_lo.value(), self.win_hi.value()),
                         baseline=self.baseline.isChecked(), exposure_ms=self._exposure_ms())
         if z is not None:
-            p.x0, p.y0, p.x1, p.y1 = z.x0, z.y0, z.x1, z.y1
+            p.x0, p.y0, p.x1, p.y1, p.angle = z.x0, z.y0, z.x1, z.y1, z.angle
         if self.reuse.isChecked() and self.last_edge:
             p.reuse_edge = self.last_edge
         return p

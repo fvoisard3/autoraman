@@ -1,7 +1,8 @@
 """Enregistrement d'une exécution de zones dans un fichier HDF5.
 
 Contenu du fichier (N points mesurés, M ≤ N images) :
-    images          (M, lignes, colonnes)  image complète de la caméra, points des zones « Raman » (uint16)
+    images          (M, lignes, colonnes)  image de la caméra, points des zones « Raman » (uint16) ; lignes = 1
+                                           si le capteur est binné dans LightField
     image_index     (N,)                   ligne de "images" pour chaque point, -1 si pas d'image
     wavelength_nm   (colonnes,)            axe spectral LightField au moment du lancement (vide sans Raman)
     position_mm     (N, 3)                 position X, Y, Z lue après le déplacement
@@ -12,9 +13,13 @@ Contenu du fichier (N points mesurés, M ≤ N images) :
     acquisition_s   (N,)                   durée de l'acquisition Raman (NaN sans image)
     attributs       réglages (réseau, centre, exposition, raie laser, puissance de référence…),
                     zones (JSON), points prévus/enregistrés, état final.
-Le fichier est vidé sur disque après chaque point : un arrêt brutal conserve les points déjà mesurés.
+
+Le fichier est ouvert puis refermé à chaque point : sous Windows, un fichier HDF5 ouvert en écriture ne peut
+pas être lu par un autre programme ; ainsi l'outil d'analyse peut relire une exécution en cours, et un arrêt
+brutal conserve les points déjà mesurés.
 """
 import datetime
+import time
 from pathlib import Path
 
 import h5py
@@ -29,6 +34,7 @@ _COLUMNS = {
     "power_W": ((), "f8"),
     "acquisition_s": ((), "f8"),
 }
+OPEN_RETRIES = 40  # × 50 ms : le fichier peut être lu au même moment par l'outil d'analyse
 
 
 def _attr(value):
@@ -45,43 +51,54 @@ class RunWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.n = 0
         self.n_images = 0
-        self._images = None
-        self._columns = {}
-        self.f = h5py.File(self.path, "w")
-        self.f.attrs["started"] = datetime.datetime.now().isoformat(timespec="seconds")
-        for key, value in attrs.items():
-            self.f.attrs[key] = _attr(value)
-        self.f.create_dataset("wavelength_nm", data=np.asarray(wavelengths_nm, dtype=float))
+        self.closed = False
+        with h5py.File(self.path, "w") as f:
+            f.attrs["started"] = datetime.datetime.now().isoformat(timespec="seconds")
+            for key, value in attrs.items():
+                f.attrs[key] = _attr(value)
+            f.create_dataset("wavelength_nm", data=np.asarray(wavelengths_nm, dtype=float))
+            for name, (shape, dtype) in _COLUMNS.items():
+                f.create_dataset(name, shape=(0,) + shape, maxshape=(None,) + shape, dtype=dtype,
+                                 chunks=(256,) + shape)
 
-        for name, (shape, dtype) in _COLUMNS.items():
-            self._columns[name] = self.f.create_dataset(
-                name, shape=(0,) + shape, maxshape=(None,) + shape, dtype=dtype, chunks=(256,) + shape)
+    def _open(self):
+        for attempt in range(OPEN_RETRIES):
+            try:
+                return h5py.File(self.path, "a")
+            except OSError:
+                if attempt == OPEN_RETRIES - 1:
+                    raise
+                time.sleep(0.05)
 
     def append(self, image=None, **values):
         """Ajoute un point ; image=None pour un point sans acquisition Raman."""
         values["image_index"] = -1
-        if image is not None:
-            if self._images is None:
-                self._images = self.f.create_dataset(
-                    "images", shape=(0,) + image.shape, maxshape=(None,) + image.shape, dtype=image.dtype,
-                    chunks=(1,) + image.shape, compression="lzf")
-            self._images.resize(self.n_images + 1, axis=0)
-            self._images[self.n_images] = image
-            values["image_index"] = self.n_images
-            self.n_images += 1
-        i = self.n
-        for name, ds in self._columns.items():
-            ds.resize(i + 1, axis=0)
-            ds[i] = values[name]
+        with self._open() as f:
+            if image is not None:
+                if "images" not in f:
+                    f.create_dataset("images", shape=(0,) + image.shape, maxshape=(None,) + image.shape,
+                                     dtype=image.dtype, chunks=(1,) + image.shape, compression="lzf")
+                ds = f["images"]
+                ds.resize(self.n_images + 1, axis=0)
+                ds[self.n_images] = image
+                values["image_index"] = self.n_images
+                self.n_images += 1
+            i = self.n
+            for name in _COLUMNS:
+                ds = f[name]
+                ds.resize(i + 1, axis=0)
+                ds[i] = values[name]
+            f.attrs["points_saved"] = i + 1
+            f.attrs["images_saved"] = self.n_images
         self.n = i + 1
-        self.f.flush()
 
     def close(self, **attrs):
-        if not self.f:
+        if self.closed:
             return
-        self.f.attrs["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
-        self.f.attrs["points_saved"] = self.n
-        self.f.attrs["images_saved"] = self.n_images
-        for key, value in attrs.items():
-            self.f.attrs[key] = _attr(value)
-        self.f.close()
+        self.closed = True
+        with self._open() as f:
+            f.attrs["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
+            f.attrs["points_saved"] = self.n
+            f.attrs["images_saved"] = self.n_images
+            for key, value in attrs.items():
+                f.attrs[key] = _attr(value)

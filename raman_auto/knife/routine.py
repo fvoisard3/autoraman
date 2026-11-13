@@ -32,7 +32,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from ..analysis.integration import Window, evaluate
 from ..analysis.runfile import raman_shift
-from ..core.zones import ACQUISITION_DEAD_TIME_S, MIN_STEP_MM, MOVE_TIME_S, POWER_READ_S
+from ..core.zones import ACQUISITION_DEAD_TIME_S, MIN_STEP_MM, MOVE_TIME_S, POWER_READ_S, rotate
 from .fit import edge_point_near, fit_caustic, fit_edge_map, fit_line
 
 TAGS = {"stage": "scan_move", "power": "scan_power", "spectro": "scan_acquire"}
@@ -52,6 +52,7 @@ class KnifeParams:
     x1: float = 0.0
     y1: float = 0.0
     map_step: float = 0.5
+    angle: float = 0.0                   # rotation du rectangle de recherche (degrés)
     # lignes (0 = automatique)
     line_length: float = 0.0
     line_step: float = 0.0
@@ -82,7 +83,7 @@ class KnifeParams:
         xs = _axis(self.x0, self.x1, self.map_step)
         ys = _axis(self.y0, self.y1, self.map_step)
         rows = [np.column_stack((xs[::-1] if i % 2 else xs, np.full(xs.size, y))) for i, y in enumerate(ys)]
-        return np.vstack(rows)
+        return rotate(np.vstack(rows), self.angle, ((self.x0 + self.x1) / 2, (self.y0 + self.y1) / 2))
 
     def estimate_s(self):
         per_point = self.point_s()

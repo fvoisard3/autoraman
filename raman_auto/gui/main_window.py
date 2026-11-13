@@ -5,14 +5,17 @@ from dataclasses import asdict
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
+    QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter,
     QTableWidget, QTableWidgetItem, QTabWidget, QToolBar, QVBoxLayout, QWidget)
 
+from ..analysis.integration import Window, evaluate, load_windows
+from ..analysis.runfile import RunFile
 from ..config import PROJECT_ROOT, output_dir, timestamp
+from ..core.presets import center_nm, center_shift, load_presets, save_presets
 from ..core.storage import RunWriter
 from ..core.zones import MIN_STEP_MM, Zone, estimate_seconds, load_zones, save_zones
 from ..drivers.lightfield import LightFieldSpectrometer, format_grating, raman_shift
@@ -26,8 +29,8 @@ from .stage_view import INK, MIN_DRAWN_MM, PLATE_EDGE, ZONE_COLOR, StageView
 from .workers import DeviceThread
 
 ZONE_COLUMNS = [("Nom", "name"), ("Type", None), ("X0", "x0"), ("Y0", "y0"), ("X1", "x1"), ("Y1", "y1"),
-                ("Pas X", "step_x"), ("Pas Y", "step_y"), ("Raman", "raman"), ("Wattmètre", "power"),
-                ("Points", None)]
+                ("Pas X", "step_x"), ("Pas Y", "step_y"), ("Angle (°)", "angle"), ("Raman", "raman"),
+                ("Wattmètre", "power"), ("Points", None)]
 CHECK_KEYS = ("raman", "power")
 KIND_LABELS = {"rect": "Rectangle", "line": "Ligne", "point": "Point"}
 JOG_STEPS_MM = [0.0125, 0.05, 0.1, 1.0, 10.0]
@@ -62,6 +65,10 @@ class MainWindow(QMainWindow):
         self.applied = {}  # dernières valeurs envoyées au spectromètre
         self.runner = None        # tâche automatique en cours : exécution des zones ou knife-edge
         self.knife_window = None
+        self._filling_editor = False
+        self.map_data = None      # carte affichée sur la platine
+        self._map_refresh_pending = False
+        self._map_wavelengths = np.empty(0)
 
         self.stage_thread = DeviceThread(self)
         self.spectro_thread = DeviceThread(self)
@@ -166,6 +173,120 @@ class MainWindow(QMainWindow):
         knife.triggered.connect(self._open_knife)
         bar.addAction(knife)
 
+        bar.addSeparator()
+        bar.addWidget(QLabel(" Carte : "))
+        self.map_combo = QComboBox()
+        self.map_combo.setToolTip("Valeur affichée en couleur sur la platine pour les points mesurés. Les fenêtres "
+                                  "Raman sont celles de l'outil d'analyse (data/analyse/fenetres.json).")
+        self.map_combo.activated.connect(lambda _: self._refresh_map(auto_levels=True))
+        bar.addWidget(self.map_combo)
+        load_map = QAction("Afficher un fichier…", self, toolTip="Afficher sur la platine la carte d'un fichier "
+                                                                 "d'exécution déjà enregistré")
+        load_map.triggered.connect(self._load_map_file)
+        bar.addAction(load_map)
+        clear_map = QAction("Effacer la carte", self)
+        clear_map.triggered.connect(self._clear_map)
+        bar.addAction(clear_map)
+        self._fill_map_combo()
+
+    # ------------------------------------------------------------------ carte sur la platine
+    def _map_windows(self):
+        try:
+            return load_windows(PROJECT_ROOT / self.cfg.get("data_dir", "data") / "analyse" / "fenetres.json")
+        except Exception:
+            return [Window("Si", 500.0, 540.0)]
+
+    def _fill_map_combo(self):
+        current = self.map_combo.currentData()
+        self._windows = self._map_windows()
+        with QSignalBlocker(self.map_combo):
+            self.map_combo.clear()
+            self.map_combo.addItem("Puissance (brute)", "power")
+            self.map_combo.addItem("Signal total (counts)", "total")
+            for i, w in enumerate(self._windows):
+                self.map_combo.addItem(f"Raman : {w.label()}", f"win{i}")
+            i = self.map_combo.findData(current)
+            self.map_combo.setCurrentIndex(i if i >= 0 else (2 if self._windows else 0))
+
+    def _point_values(self, spectrum, shift):
+        """Valeurs d'un point pour chaque choix de carte (à partir du spectre sommé sur les lignes)."""
+        out = {"total": float((spectrum - np.percentile(spectrum, 5)).sum())}
+        for i, w in enumerate(self._windows):
+            axis = shift if w.unit == "cm-1" else self._map_wavelengths
+            out[f"win{i}"] = float(evaluate(axis, spectrum, w)[0][0])
+        return out
+
+    def _new_map(self, zones, source, wavelengths, laser_nm):
+        self._fill_map_combo()
+        self._map_wavelengths = np.asarray(wavelengths, float)
+        shift = raman_shift(self._map_wavelengths, laser_nm) if self._map_wavelengths.size else None
+        self.map_data = {"zones": list(zones), "targets": [], "zone_index": [], "values": {}, "source": source,
+                         "shift": shift}
+
+    def _add_map_point(self, target, zone_index, power, spectrum):
+        d = self.map_data
+        d["targets"].append(target)
+        d["zone_index"].append(zone_index)
+        values = {"power": power}
+        if spectrum is not None and d["shift"] is not None:
+            values.update(self._point_values(spectrum, d["shift"]))
+        n = len(d["targets"])
+        for key in set(values) | set(d["values"]):
+            col = d["values"].setdefault(key, [np.nan] * (n - 1))
+            col.append(values.get(key, np.nan))
+
+    def _refresh_map(self, auto_levels=False):
+        d = self.map_data
+        key = self.map_combo.currentData()
+        if not d or not d["targets"] or key not in d["values"]:
+            self.view.set_map(None, None, None, None)
+            return
+        values = np.array(d["values"][key], float)
+        label = self.map_combo.currentText()
+        if key == "power":
+            label = "Puissance (W)"
+        self.view.set_map(d["zones"], np.array(d["targets"]), np.array(d["zone_index"]), values,
+                          label=label, keep_levels=not auto_levels)
+
+    def _schedule_map_refresh(self):
+        if not self._map_refresh_pending:
+            self._map_refresh_pending = True
+
+            def run():
+                self._map_refresh_pending = False
+                self._refresh_map(auto_levels=True)
+            QTimer.singleShot(300, run)
+
+    def _clear_map(self):
+        self.map_data = None
+        self.view.set_map(None, None, None, None)
+
+    def _load_map_file(self):
+        start = str(PROJECT_ROOT / self.cfg.get("data_dir", "data") / "runs")
+        path, _ = QFileDialog.getOpenFileName(self, "Afficher la carte d'un fichier", start, "HDF5 (*.h5)")
+        if path:
+            self.show_map_file(path)
+
+    def show_map_file(self, path):
+        try:
+            run = RunFile(path)
+            spectra = run.spectra() if run.has_images else None
+        except Exception as e:
+            QMessageBox.warning(self, "Lecture impossible", f"{path}\n\n{e}")
+            return
+        self._new_map(run.zones, path, run.wavelength_nm, run.laser_nm)
+        for i in range(run.n):
+            j = run.image_index[i]
+            spectrum = spectra[j] if spectra is not None and j >= 0 else None
+            self._add_map_point(run.target[i], int(run.zone_index[i]), float(run.power_W[i]), spectrum)
+        self._refresh_map(auto_levels=True)
+        if run.n:  # recentrer la vue sur la carte
+            t = run.target
+            pad = max(1.0, 0.15 * float(np.ptp(t[:, 0]) + np.ptp(t[:, 1])))
+            self.view.getViewBox().setRange(xRange=(t[:, 0].min() - pad, t[:, 0].max() + pad),
+                                            yRange=(t[:, 1].min() - pad, t[:, 1].max() + pad))
+        self.log(f"Carte affichée : {run.name} ({run.n} points).")
+
     def _open_knife(self):
         if self.knife_window is None:
             self.knife_window = KnifeEdgeWindow(self)
@@ -216,12 +337,58 @@ class MainWindow(QMainWindow):
         for button in (delete, save, load):
             row.addWidget(button)
 
+        # Édition directe de la zone sélectionnée : pas et rotation
+        self.edit_label = QLabel("Zone sélectionnée : —")
+        self.edit_step_x = self._spin(MIN_STEP_MM, 200.0, 1.0, 4, " mm")
+        self.edit_step_y = self._spin(MIN_STEP_MM, 200.0, 1.0, 4, " mm")
+        self.edit_angle = self._spin(-180.0, 180.0, 0.0, 2, " °")
+        self.edit_step_x.setToolTip("Pas entre deux points le long du rectangle (ou de la ligne)")
+        self.edit_step_y.setToolTip("Pas entre deux rangées du rectangle")
+        self.edit_angle.setToolTip("Rotation du rectangle autour de son centre (sens trigonométrique). "
+                                   "La poignée ronde sur le bord droit du rectangle permet aussi de le tourner.")
+        for spin, key in ((self.edit_step_x, "step_x"), (self.edit_step_y, "step_y"), (self.edit_angle, "angle")):
+            spin.valueChanged.connect(lambda value, k=key: self._edit_selected_zone(k, value))
+        edit_row = QHBoxLayout()
+        edit_row.addWidget(self.edit_label)
+        for text, spin in (("Pas X", self.edit_step_x), ("Pas Y", self.edit_step_y), ("Angle", self.edit_angle)):
+            edit_row.addWidget(QLabel(text))
+            edit_row.addWidget(spin)
+        edit_row.addStretch(1)
+        self._show_zone_editor(None)
+
         box = QWidget()
         layout = QVBoxLayout(box)
-        layout.addWidget(QLabel("Coordonnées et pas en mm. Double-clic sur une cellule pour la modifier."))
+        layout.addWidget(QLabel("Coordonnées et pas en mm. Double-clic sur une cellule pour la modifier, "
+                                "ou sélectionner une zone et régler pas et angle ci-dessous."))
         layout.addWidget(self.zone_table)
+        layout.addLayout(edit_row)
         layout.addLayout(row)
         return box
+
+    def _selected_zone(self):
+        rows = self.zone_table.selectionModel().selectedRows() if self.zone_table.selectionModel() else []
+        return self.zones[rows[0].row()] if rows and rows[0].row() < len(self.zones) else None
+
+    def _show_zone_editor(self, zone):
+        """Remplit les champs pas / angle avec la zone sélectionnée (sans déclencher de modification)."""
+        self._filling_editor = True
+        self.edit_label.setText(f"Zone sélectionnée : {zone.name}" if zone else "Zone sélectionnée : —")
+        for spin, key in ((self.edit_step_x, "step_x"), (self.edit_step_y, "step_y"), (self.edit_angle, "angle")):
+            enabled = zone is not None and self._cell_editable(zone, key) and self.runner is None
+            spin.setEnabled(enabled)
+            if zone is not None and enabled:
+                spin.setValue(getattr(zone, key))
+        self._filling_editor = False
+
+    def _edit_selected_zone(self, key, value):
+        zone = self._selected_zone()
+        if self._filling_editor or zone is None or abs(getattr(zone, key) - value) < 1e-9:
+            return
+        setattr(zone, key, value)
+        zone.clamp(self.limits)
+        self.view.update_zone(zone)
+        self._rebuild_zone_table()
+        self._refresh_zone_summary()
 
     def _build_run_controls(self):
         self.run_name = QLineEdit("acquisition")
@@ -299,6 +466,12 @@ class MainWindow(QMainWindow):
         self.grating_combo.activated.connect(self._apply_grating)
         self.center_spin = self._spin(100.0, 2000.0, 585.0, 3, " nm")
         self.center_spin.editingFinished.connect(self._apply_center)
+        self._center_nm = 585.0  # centre affiché, toujours en nm (le champ peut montrer un décalage Raman)
+        self.center_unit = QComboBox()
+        self.center_unit.addItem("nm", "nm")
+        self.center_unit.addItem("cm⁻¹ (Raman)", "cm-1")
+        self.center_unit.setToolTip("Centrage en longueur d'onde absolue ou en décalage Raman par rapport à la raie laser")
+        self.center_unit.currentIndexChanged.connect(lambda _: self._show_center(self._center_nm))
         self.exposure_spin = self._spin(1.0, 3.6e6, 1000.0, 1, " ms")
         self.exposure_spin.editingFinished.connect(self._apply_exposure)
         self.exposure_spin.valueChanged.connect(lambda _: self._refresh_zone_summary())
@@ -307,12 +480,33 @@ class MainWindow(QMainWindow):
             self.laser_combo.addItem(f"{nm:g} nm", float(nm))
         self.laser_combo.setCurrentIndex(self.laser_combo.findData(float(self.cfg["laser"]["default_nm"])))
         self.laser_combo.currentIndexChanged.connect(lambda _: self._plot_spectrum())
+        self.laser_combo.currentIndexChanged.connect(lambda _: self._show_center(self._center_nm))
         self.acquire = QPushButton("Acquérir un spectre")
         self.acquire.clicked.connect(self._acquire)
 
+        self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumContentsLength(12)
+        self.preset_load = QPushButton("Charger")
+        self.preset_load.setToolTip("Applique le réseau, le centre et l'exposition du préréglage")
+        self.preset_load.clicked.connect(self._load_preset)
+        self.preset_save = QPushButton("Sauver…")
+        self.preset_save.setToolTip("Enregistre le réseau, le centre et l'exposition affichés")
+        self.preset_save.clicked.connect(self._save_preset)
+        self.preset_delete = QPushButton("Suppr.")
+        self.preset_delete.clicked.connect(self._delete_preset)
+        presets = QHBoxLayout()
+        presets.addWidget(self.preset_combo, 1)
+        for b in (self.preset_load, self.preset_save, self.preset_delete):
+            presets.addWidget(b)
+        self._fill_preset_combo()
+
+        center = QHBoxLayout()
+        center.addWidget(self.center_spin, 1)
+        center.addWidget(self.center_unit)
         form = QFormLayout()
+        form.addRow("Préréglage", presets)
         form.addRow("Réseau", self.grating_combo)
-        form.addRow("Centre", self.center_spin)
+        form.addRow("Centre", center)
         form.addRow("Exposition", self.exposure_spin)
         form.addRow("Raie laser", self.laser_combo)
         box = QGroupBox("Spectromètre")
@@ -353,6 +547,8 @@ class MainWindow(QMainWindow):
     def _on_zone_moved(self, zone):
         self._rebuild_zone_table()
         self._refresh_zone_summary()
+        if zone is self._selected_zone():
+            self._show_zone_editor(zone)  # angle modifié à la souris
 
     def _cell_editable(self, zone, key):
         if key is None:
@@ -360,7 +556,7 @@ class MainWindow(QMainWindow):
         if zone.kind == "point":
             return key in ("name", "x0", "y0")
         if zone.kind == "line":
-            return key != "step_y"
+            return key not in ("step_y", "angle")
         return True
 
     def _cell_text(self, zone, key, header):
@@ -422,8 +618,9 @@ class MainWindow(QMainWindow):
             self.zone_table.selectRow(self.zones.index(zone))
 
     def _on_zone_selection(self):
-        rows = self.zone_table.selectionModel().selectedRows()
-        self.view.highlight(self.zones[rows[0].row()] if rows else None)
+        zone = self._selected_zone()
+        self.view.highlight(zone)
+        self._show_zone_editor(zone)
 
     def _delete_selected_zone(self):
         rows = self.zone_table.selectionModel().selectedRows()
@@ -584,6 +781,7 @@ class MainWindow(QMainWindow):
         self.spectro_connect.setEnabled(not busy)
         for widget in (self.grating_combo, self.center_spin, self.exposure_spin, self.acquire):
             widget.setEnabled(connected and not busy)
+        self._refresh_preset_buttons()
         self.spectro_status.setText("Déconnecté" if not connected else "Occupé…" if busy else "Prêt")
         self._refresh_run_ui()
         if self.knife_window is not None:
@@ -618,9 +816,127 @@ class MainWindow(QMainWindow):
             for raw in info["gratings"]:
                 self.grating_combo.addItem(format_grating(raw), raw)
             self.grating_combo.setCurrentIndex(self.grating_combo.findData(info["grating"]))
-        with QSignalBlocker(self.center_spin):
-            self.center_spin.setValue(info["center"])
+        self._show_center(info["center"])
         self.exposure_spin.setValue(info["exposure"])
+
+    # centre : affiché en nm ou en décalage Raman, toujours envoyé en nm
+    def _center_unit(self):
+        return self.center_unit.currentData()
+
+    def _show_center(self, nm):
+        self._center_nm = float(nm)
+        with QSignalBlocker(self.center_spin):
+            if self._center_unit() == "nm":
+                self.center_spin.setRange(100.0, 2000.0)
+                self.center_spin.setDecimals(3)
+                self.center_spin.setSuffix(" nm")
+                self.center_spin.setValue(self._center_nm)
+            else:
+                self.center_spin.setRange(-20000.0, 20000.0)
+                self.center_spin.setDecimals(2)
+                self.center_spin.setSuffix(" cm⁻¹")
+                self.center_spin.setValue(center_shift(self._center_nm, self.laser_combo.currentData()))
+
+    def _center_target_nm(self):
+        return center_nm(self.center_spin.value(), self._center_unit(), self.laser_combo.currentData())
+
+    # préréglages
+    def _presets_path(self):
+        return PROJECT_ROOT / self.cfg.get("data_dir", "data") / "presets" / "spectrometre.json"
+
+    def _fill_preset_combo(self, select=None):
+        current = select or self.preset_combo.currentText()
+        presets = load_presets(self._presets_path())
+        with QSignalBlocker(self.preset_combo):
+            self.preset_combo.clear()
+            for name in sorted(presets, key=str.lower):
+                p = presets[name]
+                self.preset_combo.addItem(name)
+                self.preset_combo.setItemData(self.preset_combo.count() - 1, self._describe_preset(p),
+                                              Qt.ItemDataRole.ToolTipRole)
+            i = self.preset_combo.findText(current)
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
+        has = self.preset_combo.count() > 0
+        self.preset_delete.setEnabled(has)
+        self._refresh_preset_buttons()
+
+    def _refresh_preset_buttons(self):
+        busy = self.spectro_thread.busy or self.runner is not None if hasattr(self, "spectro_thread") else False
+        self.preset_load.setEnabled(self.preset_combo.count() > 0 and self.spectro is not None and not busy)
+
+    @staticmethod
+    def _describe_preset(p):
+        unit = " cm⁻¹" if p.get("unit") == "cm-1" else " nm"
+        parts = [format_grating(p["grating"]) if p.get("grating") else "réseau inchangé",
+                 f"centre {p['center']:g}{unit}", f"exposition {p['exposure_ms']:g} ms"]
+        text = ", ".join(parts)
+        if p.get("unit") == "cm-1":
+            text += f" (enregistré avec la raie {p.get('laser_nm', 0):g} nm)"
+        return text
+
+    def _save_preset(self):
+        name, ok = QInputDialog.getText(self, "Sauver un préréglage", "Nom du préréglage :",
+                                        text=self.preset_combo.currentText())
+        name = name.strip()
+        if not ok or not name:
+            return
+        presets = load_presets(self._presets_path())
+        if name in presets and QMessageBox.question(
+                self, "Sauver un préréglage", f"Remplacer le préréglage « {name} » ?") != QMessageBox.StandardButton.Yes:
+            return
+        presets[name] = {"grating": self.grating_combo.currentData() or self.applied.get("grating"),
+                         "center": round(self.center_spin.value(), self.center_spin.decimals()),
+                         "unit": self._center_unit(),
+                         "laser_nm": self.laser_combo.currentData(),
+                         "exposure_ms": self.exposure_spin.value()}
+        save_presets(self._presets_path(), presets)
+        self._fill_preset_combo(select=name)
+        self.log(f"Préréglage « {name} » enregistré : {self._describe_preset(presets[name])}.")
+
+    def _delete_preset(self):
+        name = self.preset_combo.currentText()
+        presets = load_presets(self._presets_path())
+        if name not in presets or QMessageBox.question(
+                self, "Supprimer un préréglage", f"Supprimer le préréglage « {name} » ?") != QMessageBox.StandardButton.Yes:
+            return
+        del presets[name]
+        save_presets(self._presets_path(), presets)
+        self._fill_preset_combo()
+        self.log(f"Préréglage « {name} » supprimé.")
+
+    def _load_preset(self):
+        name = self.preset_combo.currentText()
+        p = load_presets(self._presets_path()).get(name)
+        if p is None or self.spectro is None:
+            return
+        grating = p.get("grating")
+        if grating and self.grating_combo.findData(grating) < 0:
+            QMessageBox.warning(self, "Préréglage", f"Le réseau du préréglage « {name} » n'existe pas sur ce "
+                                                   f"spectromètre :\n{grating}\nLe réseau ne sera pas changé.")
+            grating = None
+        laser = self.laser_combo.currentData()
+        unit = p.get("unit", "nm")
+        target = center_nm(p["center"], unit, laser)  # un décalage Raman suit la raie laser actuelle
+        with QSignalBlocker(self.center_unit):
+            self.center_unit.setCurrentIndex(self.center_unit.findData(unit))
+        self._show_center(target)
+        self.exposure_spin.setValue(p["exposure_ms"])
+        if grating:
+            with QSignalBlocker(self.grating_combo):
+                self.grating_combo.setCurrentIndex(self.grating_combo.findData(grating))
+        spectro, exposure = self.spectro, float(p["exposure_ms"])
+
+        def job():
+            if grating and spectro.grating != grating:
+                spectro.grating = grating
+            spectro.center_wavelength_nm = target
+            spectro.exposure_ms = exposure
+            return self._read_spectro(spectro)
+
+        extra = f" (raie {laser:g} nm → {target:.3f} nm)" if unit == "cm-1" else ""
+        self.log(f"Chargement du préréglage « {name} » : {self._describe_preset(p)}{extra}.")
+        self.spectro_thread.submit("préréglage", job)
 
     def _spectro_setter(self, tag, attribute, value):
         spectro = self.spectro
@@ -638,8 +954,10 @@ class MainWindow(QMainWindow):
             self._spectro_setter("grating", "grating", raw)
 
     def _apply_center(self):
-        if self.spectro is not None and abs(self.center_spin.value() - self.applied.get("center", 0.0)) > 1e-3:
-            self._spectro_setter("center", "center_wavelength_nm", self.center_spin.value())
+        target = self._center_target_nm()
+        self._center_nm = target
+        if self.spectro is not None and abs(target - self.applied.get("center", 0.0)) > 1e-3:
+            self._spectro_setter("center", "center_wavelength_nm", target)
 
     def _apply_exposure(self):
         if self.spectro is not None and abs(self.exposure_spin.value() - self.applied.get("exposure", 0.0)) > 1e-3:
@@ -752,6 +1070,8 @@ class MainWindow(QMainWindow):
         self.runner.finished.connect(self._on_run_finished)
         self._done_points = []
         self.view.set_done_points(None)
+        self._new_map(self.zones, str(path), [], laser)  # carte en direct ; axe spectral au premier spectre
+        self.view.set_map(None, None, None, None)
         self.run_progress.setRange(0, n)
         self.run_progress.setValue(0)
         self.run_status.setText(f"Préparation… fichier : {path}")
@@ -780,15 +1100,26 @@ class MainWindow(QMainWindow):
         self.run_progress.setValue(done)
         self.run_status.setText(f"{done}/{total} points — reste environ {format_duration(remaining_s)}")
 
-    def _on_run_point(self, index, x, y, spectrum):
+    def _on_run_point(self, index, x, y, spectrum, power):
         self._done_points.append((x, y))
         self.view.set_done_points(np.array(self._done_points))
         if spectrum is not None:
             self.last_spectrum = (self.runner.wavelengths, spectrum)
             self._plot_spectrum()
+        d = self.map_data
+        if d is not None:
+            if d["shift"] is None and spectrum is not None and self.runner.wavelengths is not None \
+                    and len(self.runner.wavelengths):
+                self._map_wavelengths = np.asarray(self.runner.wavelengths, float)
+                d["shift"] = raman_shift(self._map_wavelengths, self.laser_combo.currentData())
+            self._add_map_point((x, y), int(self.runner.zone_index[index]), power, spectrum)
+            self._schedule_map_refresh()
 
     def _on_run_finished(self, message):
         self.runner = None
+        if self.map_data and self.map_data["targets"]:
+            self.view.set_done_points(None)  # la carte remplace les points mesurés
+            self._refresh_map(auto_levels=True)
         self.power.set_running(False)
         self.run_status.setText(message)
         self.log(message)

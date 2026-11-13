@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget)
 
 from ..config import PROJECT_ROOT
+from ..gui.map_layer import place_image
 from .integration import MEASURES, Window, evaluate, grid_rect, load_windows, save_windows
 from .runfile import RunFile
 
@@ -657,9 +658,10 @@ class AnalysisWindow(QMainWindow):
         for k in self._checked_zones():
             if k < len(run.zones) and run.zones[k].kind == "rect":
                 sel = run.zone_index == k
-                grid, rect = grid_rect(run.zones[k], run.target[sel], values[sel])
+                zone = run.zones[k]
+                grid, rect = grid_rect(zone, zone.to_local(run.target[sel]), values[sel])
                 img = pg.ImageItem(grid, axisOrder="row-major")
-                img.setRect(QRectF(*rect))
+                place_image(img, rect, zone.angle, zone.center)  # rectangle éventuellement tourné
                 img.setZValue(-1)
                 self.map_plot.addItem(img)
                 self.map_images.append(img)
@@ -718,7 +720,7 @@ class AnalysisWindow(QMainWindow):
             return
         pos = self.map_plot.getViewBox().mapSceneToView(ev.scenePos())
         for img in self.map_images:
-            if img.mapRectToParent(img.boundingRect()).contains(pos):
+            if img.boundingRect().contains(img.mapFromParent(pos)):
                 mask = self._visible_mask()
                 d = np.hypot(self.run.target[:, 0] - pos.x(), self.run.target[:, 1] - pos.y())
                 d[~mask] = np.inf

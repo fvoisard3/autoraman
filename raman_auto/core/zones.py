@@ -17,8 +17,20 @@ def _axis(a, b, step):
     return lo + np.arange(math.floor((hi - lo) / step + 1e-9) + 1) * step
 
 
+def rotate(xy, angle_deg, center):
+    """Rotation de points (N, 2) autour de center, angle en degrés (sens trigonométrique)."""
+    if not angle_deg:
+        return np.asarray(xy, float)
+    a = math.radians(angle_deg)
+    r = np.array([[math.cos(a), -math.sin(a)], [math.sin(a), math.cos(a)]])
+    c = np.asarray(center, float)
+    return (np.asarray(xy, float) - c) @ r.T + c
+
+
 @dataclass(eq=False)
 class Zone:
+    """Zone d'analyse. Pour un rectangle, (x0, y0)–(x1, y1) sont les coins avant rotation ; angle (degrés,
+    sens trigonométrique) tourne le rectangle et sa grille de points autour de son centre."""
     name: str
     kind: str  # "rect", "line" ou "point"
     x0: float
@@ -29,10 +41,28 @@ class Zone:
     step_y: float = 1.0
     raman: bool = True    # acquérir l'image de la caméra à chaque point
     power: bool = False   # enregistrer une lecture du wattmètre à chaque point
+    angle: float = 0.0    # rotation d'un rectangle (degrés)
+
+    @property
+    def center(self):
+        return ((self.x0 + self.x1) / 2, (self.y0 + self.y1) / 2)
+
+    def corners(self):
+        """Coins du rectangle tourné (4, 2), dans l'ordre du contour."""
+        xlo, xhi = min(self.x0, self.x1), max(self.x0, self.x1)
+        ylo, yhi = min(self.y0, self.y1), max(self.y0, self.y1)
+        box = np.array([[xlo, ylo], [xhi, ylo], [xhi, yhi], [xlo, yhi]])
+        return rotate(box, self.angle, self.center) if self.kind == "rect" else box
 
     def clamp(self, limits):
-        """Ramène la zone dans les limites de la platine."""
+        """Ramène la zone dans les limites de la platine (un rectangle tourné est translaté en bloc)."""
         (xlo, xhi), (ylo, yhi) = limits["x"], limits["y"]
+        if self.kind == "rect" and self.angle:
+            c = self.corners()
+            dx = max(0.0, xlo - c[:, 0].min()) - max(0.0, c[:, 0].max() - xhi)
+            dy = max(0.0, ylo - c[:, 1].min()) - max(0.0, c[:, 1].max() - yhi)
+            self.x0, self.x1, self.y0, self.y1 = self.x0 + dx, self.x1 + dx, self.y0 + dy, self.y1 + dy
+            return
         self.x0, self.x1 = (min(max(v, xlo), xhi) for v in (self.x0, self.x1))
         self.y0, self.y1 = (min(max(v, ylo), yhi) for v in (self.y0, self.y1))
 
@@ -53,7 +83,11 @@ class Zone:
             return np.array([self.x0, self.y0]) + np.outer(np.arange(self.count()) * self.step_x, direction)
         xs, ys = _axis(self.x0, self.x1, self.step_x), _axis(self.y0, self.y1, self.step_y)
         rows = [np.column_stack((xs[::-1] if i % 2 else xs, np.full(xs.size, y))) for i, y in enumerate(ys)]
-        return np.vstack(rows)
+        return rotate(np.vstack(rows), self.angle, self.center)
+
+    def to_local(self, xy):
+        """Coordonnées dans le repère du rectangle non tourné (inverse de la rotation)."""
+        return rotate(xy, -self.angle, self.center)
 
 
 def estimate_seconds(zones, exposure_ms):

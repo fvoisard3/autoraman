@@ -122,6 +122,14 @@ check-list laser avant le départ, pause / reprise / arrêt entre deux points, p
 Par zone : case « Raman » (cochée par défaut, image complète) et case « Wattmètre » (lecture de puissance au
 point, faite pendant l'exposition si les deux sont cochées) ; une zone « Wattmètre » seule ne prend pas d'image.
 Validé en simulation ; essai réel à faire (plateau à Z = 20 lors du test : non lancé).
+Ajouts (2026-11-13) : pas et angle de la zone sélectionnée réglables sous le tableau ; rectangles tournés
+(poignée ronde ou champ « Angle », grille de points tournée autour du centre) ; carte mesurée affichée en
+couleur sur la vue de la platine, en direct pendant l'exécution ou depuis un fichier (puissance brute, signal
+total, fenêtres Raman de l'outil d'analyse) ; fichier HDF5 refermé après chaque point pour pouvoir le relire
+pendant l'exécution (Windows interdit la lecture d'un fichier HDF5 ouvert en écriture).
+Spectromètre : centre saisi en nm ou en décalage Raman (cm⁻¹, converti avec la raie laser choisie) ;
+préréglages nommés (réseau, centre, exposition) sauvés dans `data/presets/spectrometre.json` — un préréglage
+en cm⁻¹ garde le décalage et suit la raie laser actuelle au chargement.
 
 - **Mapping** : grille rectangulaire, balayage en serpentin ou ligne par ligne, liste de points ; carte en direct (intégrale ou position d'une bande) ; temps restant estimé ; sauvegarde point par point et reprise après interruption.
 - **Répétitions** : N spectres par point (ou sur plusieurs points) → moyenne, écart-type, SNR, retrait des rayons cosmiques (comparaison entre répétitions), suivi de la puissance si le capteur est disponible.
